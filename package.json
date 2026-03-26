@@ -1,0 +1,21 @@
+{
+  "name": "discord-management-bot",
+  "version": "1.0.0",
+  "description": "Discord bot for management system with tasks, XP tracking, and leaderboards",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "canvas": "^3.2.1",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.6.1",
+    "express": "^4.18.2",
+    "sqlite3": "^5.1.6"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "author": "",
+  "license": "ISC"
+}
