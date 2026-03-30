@@ -82,7 +82,7 @@ const client = new Client({
 });
 
 // ============================================
-// � إعداد خادم HTTP لـ Render
+//   إعداد خادم HTTP لـ Render
 // ============================================
 
 app.get('/', (req, res) => {
@@ -95,7 +95,7 @@ app.listen(PORT, () => {
 });
 
 // ============================================
-// �🎤 متغيرات تتبع الصوت
+//  🎤 متغيرات تتبع الصوت
 // ============================================
 
 // خريطة لتتبع جلسات الصوت النشطة
@@ -312,6 +312,69 @@ function getWarningsDetails(userId) {
   });
 }
 
+function getSetupConfig() {
+  try {
+    if (!fs.existsSync('./rolesetup.json')) return {};
+    return JSON.parse(fs.readFileSync('./rolesetup.json', 'utf8')) || {};
+  } catch (err) {
+    console.error('خطأ في قراءة ملف التكوين:', err);
+    return {};
+  }
+}
+
+function saveSetupConfig(config) {
+  try {
+    fs.writeFileSync('./rolesetup.json', JSON.stringify(config, null, 2));
+    return true;
+  } catch (err) {
+    console.error('خطأ في حفظ ملف التكوين:', err);
+    return false;
+  }
+}
+
+function parseChannelIdFromString(text) {
+  if (!text) return null;
+  const mentionMatch = text.match(/<#(\d{17,20})>/);
+  if (mentionMatch) return mentionMatch[1];
+  const idMatch = text.match(/^(\d{17,20})$/);
+  if (idMatch) return idMatch[1];
+  const urlMatch = text.match(/discord(?:app)?\.com\/channels\/(?:\d{17,20})\/(\d{17,20})/i);
+  if (urlMatch) return urlMatch[1];
+  return null;
+}
+
+function getLogChannel(guild, type) {
+  const config = getSetupConfig();
+  if (!config) return null;
+
+  let channelId = null;
+  if (type === 'points') channelId = config.pointsLogChannelId;
+  else if (type === 'voice') channelId = config.voiceLogChannelId;
+  else if (type === 'reset') channelId = config.resetLogChannelId;
+  else if (type === 'general') channelId = config.generalLogChannelId || config.logChannelId;
+
+  if (!channelId) return null;
+  return guild.channels.cache.get(channelId) || null;
+}
+
+function isBotAdmin(member) {
+  if (!member) return false;
+  const config = getSetupConfig();
+  if (member.permissions.has(PermissionsBitField.Flags.Administrator)) return true;
+  if (config.adminRoleId && member.roles.cache.has(config.adminRoleId)) return true;
+  return false;
+}
+
+async function sendLogEmbed(guild, type, embed) {
+  const channel = getLogChannel(guild, type);
+  if (!channel) return;
+  try {
+    await channel.send({ embeds: [embed] });
+  } catch (err) {
+    console.error('خطأ في إرسال لوق:', err);
+  }
+}
+
 // ============================================
 // 📡 أحداث البوت (Events)
 // ============================================
@@ -336,33 +399,70 @@ client.on('messageCreate', async (message) => {
     const userId = message.author.id;
     const username = message.author.username;
 
-    // أمر /تسطيب لإعداد آيدي الرتبة الإدارية
+    // أمر /تسطيب لإعداد رتبة المشرف أو قنوات اللوق
     if (message.content.startsWith('/تسطيب')) {
       try {
-        // تحقق من أن المستخدم مسؤول
-        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-          return message.reply('❌ فقط المسؤول يمكنه إعداد الرتبة الإدارية.');
+        if (!isBotAdmin(message.member)) {
+          return message.reply('❌ فقط المسؤول أو رتبة المشرف المخصصة يمكنه استخدام أمر /تسطيب.');
         }
-        message.reply('🛠️ يرجى إرسال آيدي الرتبة الإدارية (Role ID) في الرسالة التالية. لديك 60 ثانية.');
-        // انتظر رسالة من نفس المستخدم
+
+        const args = message.content.trim().split(/ +/);
+        const target = args.slice(1).join(' ').trim();
+
+        if (!target) {
+          return message.reply('✅ استخدم `/تسطيب رتبة` أو `/تسطيب لوق نقاط` أو `/تسطيب لوق الفويس` أو `/تسطيب لوق التصفير`.');
+        }
+
+        const validTargets = ['رتبة', 'لوق نقاط', 'لوق الفويس', 'لوق التصفير'];
+        if (!validTargets.includes(target)) {
+          return message.reply('❌ الخيار غير صحيح. استخدم: `/تسطيب رتبة`, `/تسطيب لوق نقاط`, `/تسطيب لوق الفويس`, أو `/تسطيب لوق التصفير`.');
+        }
+
         const filter = m => m.author.id === message.author.id && !m.author.bot;
+        let prompt = '';
+
+        if (target === 'رتبة') {
+          prompt = '🛠️ أرسل آيدي الرتبة التي تريد تخصيصها كمشرف للبوت. هذه الرتبة لا تحتاج صلاحيات إدارة الخادم.';
+        } else {
+          prompt = '🛠️ أرسل آيدي قناة اللوق أو رابط القناة. ستُستخدم هذه القناة لإرسال لوق خاص بهذا النوع.';
+        }
+
+        message.reply(prompt + ' لديك 60 ثانية.');
+
         message.channel.awaitMessages({ filter, max: 1, time: 60000, errors: ['time'] })
           .then(collected => {
-            const roleId = collected.first().content.trim();
-            if (!/^[0-9]{17,20}$/.test(roleId)) {
-              return message.reply('❌ آيدي الرتبة غير صحيح. يجب أن يكون أرقام فقط.');
+            const value = collected.first().content.trim();
+            const config = getSetupConfig();
+
+            if (target === 'رتبة') {
+              if (!/^[0-9]{17,20}$/.test(value)) {
+                return message.reply('❌ آيدي الرتبة غير صحيح. يجب أن يكون أرقام فقط.');
+              }
+              config.adminRoleId = value;
+              saveSetupConfig(config);
+              return message.reply('✅ تم حفظ آيدي رتبة المشرف بنجاح. أصحاب هذه الرتبة يمكنهم استخدام أوامر الإدارة الآن.');
             }
-            // حفظ الآيدي في ملف rolesetup.json
-            fs.writeFileSync('./rolesetup.json', JSON.stringify({ adminRoleId: roleId }, null, 2));
-            message.reply('✅ تم حفظ آيدي الرتبة الإدارية بنجاح!');
+
+            const channelId = parseChannelIdFromString(value);
+            if (!channelId) {
+              return message.reply('❌ لم يتم التعرف على قناة صحيحة. أرسل آيدي القناة أو رابط القناة.');
+            }
+
+            if (target === 'لوق نقاط') config.pointsLogChannelId = channelId;
+            else if (target === 'لوق الفويس') config.voiceLogChannelId = channelId;
+            else if (target === 'لوق التصفير') config.resetLogChannelId = channelId;
+
+            saveSetupConfig(config);
+            return message.reply(`✅ تم حفظ قناة ${target} بنجاح.`);
           })
           .catch(() => {
-            message.reply('⏰ انتهى الوقت ولم يتم استلام آيدي الرتبة. أعد المحاولة.');
+            message.reply('⏰ انتهى الوقت ولم يتم استلام الرد. أعد المحاولة.');
           });
+
         return;
       } catch (error) {
         console.error('خطأ في أمر /تسطيب:', error);
-        message.reply('❌ حدث خطأ أثناء إعداد الرتبة. يرجى المحاولة مرة أخرى.');
+        message.reply('❌ حدث خطأ أثناء إعداد التكوين. يرجى المحاولة مرة أخرى.');
         return;
       }
     }
@@ -561,14 +661,14 @@ client.on('messageCreate', async (message) => {
     // إضافة المستخدم إذا لم يكن موجوداً
     await addUser(userId, username);
 
-    // إضافة XP للرسائل (30 XP لكل رسالة مع فترة راحة دقيقة واحدة)
+    // إضافة XP للرسائل (10 XP لكل رسالة مع فترة راحة دقيقة واحدة)
     const now = Date.now();
     const userData = await getUserData(userId);
 
     if (!userData || now - userData.last_message_time > 60000) { // فترة راحة دقيقة واحدة
       const currentXP = userData ? userData.xp : 0;
       await updateUserData(userId, {
-        xp: currentXP + 30,
+        xp: currentXP + 10,
         last_message_time: now
       });
     }
@@ -603,7 +703,13 @@ client.on('messageCreate', async (message) => {
                     '`/إضافة نقاط @المستخدم [العدد]` - إضافة نقاط\n' +
                     '`/إزالة نقاط @المستخدم [العدد]` - إزالة نقاط\n' +
                     '`/تحذير @المستخدم [السبب]` - إعطاء تحذير\n' +
-                    '`/تسطيب` - إعداد البوت'
+                    '`/تسطيب رتبة` - تعيين رتبة مشرف للبوت\n' +
+                    '`/تسطيب لوق نقاط` - تعيين قناة لوق النقاط\n' +
+                    '`/تسطيب لوق الفويس` - تعيين قناة لوق الفويس\n' +
+                    '`/تسطيب لوق التصفير` - تعيين قناة لوق التصفير\n' +
+                    '`/تصفير نقاط @المستخدم` - تصفير نقاط المستخدم\n' +
+                    '`/تصفير الفويس @المستخدم` - تصفير وقت الصوت\n' +
+                    '`/تصفير رانك @المستخدم` - تصفير الخبرة'
                 }
               )
               .setFooter({ text: 'النقاط تُضاف يدويّاً من المشرفين فقط عبر أمر /إضافة نقاط' });
@@ -699,8 +805,8 @@ client.on('messageCreate', async (message) => {
 
           case 'إضافة':
             // فحص الصلاحيات
-            if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-              return message.reply('❌ ليس لديك صلاحية استخدام هذا الأمر! (مطلوب: إدارة الخادم)');
+            if (!isBotAdmin(message.member)) {
+              return message.reply('❌ ليس لديك صلاحية استخدام هذا الأمر! (مطلوب: رتبة المشرف أو إدارة الخادم)');
             }
 
             if (args[0] === 'نقاط' && args[1]) {
@@ -725,6 +831,18 @@ client.on('messageCreate', async (message) => {
                 .setColor(0x00ff00);
 
               message.channel.send({ embeds: [successEmbed] });
+
+              const pointsLogEmbed = new EmbedBuilder()
+                .setTitle('📥 لوق نقاط')
+                .setDescription(`تم إضافة **${points}** نقطة إلى ${targetUser.toString()}`)
+                .addFields(
+                  { name: '👮 بواسطة', value: message.author.tag, inline: true },
+                  { name: '🧾 المستخدم', value: targetUser.tag, inline: true }
+                )
+                .setColor(0x00ff00)
+                .setTimestamp();
+
+              sendLogEmbed(message.guild, 'points', pointsLogEmbed);
             } else if (args[0] === 'مهمة') {
               // /إضافة مهمة [المهام ...]
               const today = new Date().toISOString().split('T')[0];
@@ -775,10 +893,62 @@ client.on('messageCreate', async (message) => {
             }
             break;
 
+          case 'تصفير':
+            if (!isBotAdmin(message.member)) {
+              return message.reply('❌ ليس لديك صلاحية استخدام هذا الأمر! (مطلوب: رتبة المشرف أو إدارة الخادم)');
+            }
+
+            const resetType = args[0] ? args[0].toLowerCase() : null;
+            const resetTargetUser = message.mentions.users.first();
+            if (!resetTargetUser) {
+              return message.reply('❌ يرجى ذكر المستخدم المطلوب تصفير بياناته. الصيغة: `/تصفير نقاط @المستخدم` أو `/تصفير الفويس @المستخدم` أو `/تصفير رانك @المستخدم`');
+            }
+
+            if (!['نقاط', 'الفويس', 'رانك'].includes(resetType)) {
+              return message.reply('❌ الصيغة غير صحيحة. استخدم: `/تصفير نقاط @المستخدم`, `/تصفير الفويس @المستخدم`, أو `/تصفير رانك @المستخدم`.');
+            }
+
+            await addUser(resetTargetUser.id, resetTargetUser.username);
+            const resetUserData = await getUserData(resetTargetUser.id);
+            if (!resetUserData) {
+              return message.reply('❌ لم يتم العثور على بيانات المستخدم.');
+            }
+
+            let updatedFields = {};
+            let resetDescription = '';
+
+            if (resetType === 'نقاط') {
+              updatedFields = { points: 0 };
+              resetDescription = `تم تصفير نقاط ${resetTargetUser.toString()}`;
+            } else if (resetType === 'الفويس') {
+              updatedFields = { voice_time: 0 };
+              resetDescription = `تم تصفير وقت الصوت لـ ${resetTargetUser.toString()}`;
+            } else if (resetType === 'رانك') {
+              updatedFields = { xp: 0 };
+              resetDescription = `تم تصفير الخبرة (الرانك) لـ ${resetTargetUser.toString()}`;
+            }
+
+            await updateUserData(resetTargetUser.id, updatedFields);
+
+            const resetEmbed = new EmbedBuilder()
+              .setTitle('♻️ تم التصفير')
+              .setDescription(resetDescription)
+              .addFields(
+                { name: '👮 بواسطة', value: message.author.tag, inline: true },
+                { name: '🧾 المستخدم', value: resetTargetUser.tag, inline: true },
+                { name: '📌 النوع', value: resetType, inline: true }
+              )
+              .setColor(0xffa500)
+              .setTimestamp();
+
+            message.channel.send({ embeds: [resetEmbed] });
+            sendLogEmbed(message.guild, 'reset', resetEmbed);
+            break;
+
           case 'إزالة':
             // فحص الصلاحيات
-            if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-              return message.reply('❌ ليس لديك صلاحية استخدام هذا الأمر! (مطلوب: إدارة الخادم)');
+            if (!isBotAdmin(message.member)) {
+              return message.reply('❌ ليس لديك صلاحية استخدام هذا الأمر! (مطلوب: رتبة المشرف أو إدارة الخادم)');
             }
 
             if (args[0] === 'نقاط' && args[1]) {
@@ -807,6 +977,18 @@ client.on('messageCreate', async (message) => {
                 .setColor(0xff0000);
 
               message.channel.send({ embeds: [successEmbed] });
+
+              const pointsLogEmbed = new EmbedBuilder()
+                .setTitle('📤 لوق نقاط')
+                .setDescription(`تم إزالة **${points}** نقطة من ${targetUser.toString()}`)
+                .addFields(
+                  { name: '👮 بواسطة', value: message.author.tag, inline: true },
+                  { name: '🧾 المستخدم', value: targetUser.tag, inline: true }
+                )
+                .setColor(0xff0000)
+                .setTimestamp();
+
+              sendLogEmbed(message.guild, 'points', pointsLogEmbed);
             } else {
               message.reply('❌ استخدام خاطئ! الصيغة الصحيحة: `/إزالة نقاط @المستخدم [العدد]`');
             }
@@ -848,8 +1030,8 @@ client.on('messageCreate', async (message) => {
 
           case 'تحذير':
             // أمر التحذير (للمشرفين فقط)
-            if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-              return message.reply('❌ ليس لديك صلاحية استخدام هذا الأمر! (مطلوب: إدارة الخادم)');
+            if (!isBotAdmin(message.member)) {
+              return message.reply('❌ ليس لديك صلاحية استخدام هذا الأمر! (مطلوب: رتبة المشرف أو إدارة الخادم)');
             }
 
             const warnedUser = message.mentions.users.first();
